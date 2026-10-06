@@ -13,6 +13,14 @@ npm run typecheck
 
 `NEXO_USER_DATA=/algum/dir npm run dev` isola conexões e histórico em outro diretório.
 
+## Instalando no Linux
+
+```bash
+npm run install:linux
+```
+
+Gera o build (`dist/linux-unpacked` e um `.AppImage` portátil em `dist/`) e instala para o usuário atual, sem sudo: binários em `~/.local/opt/nexo-db`, ícone e atalho "Nexo DB" no menu de aplicativos. Para atualizar, é só rodar de novo.
+
 ## O que já tem
 
 - **Conexões**: cadastro com cor, teste, SSL, senha cifrada pelo chaveiro do SO (`safeStorage`). Dá para colar uma URL `postgres://` no formulário.
