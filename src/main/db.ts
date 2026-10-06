@@ -643,6 +643,51 @@ export async function countRows(
   return Number(rows[0].n)
 }
 
+/** Valores distintos de uma coluna com a frequência de cada um (mais frequentes primeiro). */
+export async function columnDistinct(
+  connId: string,
+  database: string,
+  schema: string,
+  table: string,
+  column: string,
+  where?: string,
+  limit = 500
+): Promise<{ value: string | null; count: number }[]> {
+  const col = quoteIdent(column)
+  let sql = `select ${col}::text as value, count(*) as n from ${qualified(schema, table)}`
+  if (where?.trim()) sql += ` where ${where}`
+  sql += ` group by 1 order by 2 desc, 1 limit ${Math.max(1, Math.floor(limit))}`
+  const { rows } = await getPool(connId, database).query(sql)
+  return rows.map((r) => ({ value: r.value, count: Number(r.n) }))
+}
+
+/** Resumo de uma coluna: totais, nulos, distintos e (quando o tipo permite) mín/máx/média. */
+export async function columnStats(
+  connId: string,
+  database: string,
+  schema: string,
+  table: string,
+  column: string,
+  opts: { where?: string; minMax: boolean; avg: boolean }
+): Promise<{ total: number; nulls: number; distinct: number; min: string | null; max: string | null; avg: string | null }> {
+  const col = quoteIdent(column)
+  let sql = `select count(*) as total, count(${col}) as present, count(distinct ${col}::text) as distinct_n,
+    ${opts.minMax ? `min(${col})::text` : 'null'} as min, ${opts.minMax ? `max(${col})::text` : 'null'} as max,
+    ${opts.avg ? `round(avg(${col})::numeric, 4)::text` : 'null'} as avg
+    from ${qualified(schema, table)}`
+  if (opts.where?.trim()) sql += ` where ${opts.where}`
+  const { rows } = await getPool(connId, database).query(sql)
+  const r = rows[0]
+  return {
+    total: Number(r.total),
+    nulls: Number(r.total) - Number(r.present),
+    distinct: Number(r.distinct_n),
+    min: r.min,
+    max: r.max,
+    avg: r.avg
+  }
+}
+
 export async function applyChanges(
   connId: string,
   database: string,

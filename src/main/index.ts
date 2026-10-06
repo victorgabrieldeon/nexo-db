@@ -125,6 +125,16 @@ function registerIpc(): void {
   handle('table:count', (id: string, database: string, schema: string, table: string, where?: string, cap?: number) =>
     db.countRows(id, database, schema, table, where, cap)
   )
+  handle(
+    'table:distinct',
+    (id: string, database: string, schema: string, table: string, column: string, where?: string, limit?: number) =>
+      db.columnDistinct(id, database, schema, table, column, where, limit)
+  )
+  handle(
+    'table:stats',
+    (id: string, database: string, schema: string, table: string, column: string, opts: { where?: string; minMax: boolean; avg: boolean }) =>
+      db.columnStats(id, database, schema, table, column, opts)
+  )
   handle('table:apply', (id: string, database: string, schema: string, table: string, changes: RowChange[]) =>
     db.applyChanges(id, database, schema, table, changes)
   )

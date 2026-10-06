@@ -64,6 +64,25 @@ const api = {
     data: (id: string, database: string, req: TableDataRequest) => call<QueryResult>('table:data', id, database, req),
     count: (id: string, database: string, schema: string, table: string, where?: string, cap?: number) =>
       call<number>('table:count', id, database, schema, table, where, cap),
+    distinct: (id: string, database: string, schema: string, table: string, column: string, where?: string, limit?: number) =>
+      call<{ value: string | null; count: number }[]>('table:distinct', id, database, schema, table, column, where, limit),
+    stats: (
+      id: string,
+      database: string,
+      schema: string,
+      table: string,
+      column: string,
+      opts: { where?: string; minMax: boolean; avg: boolean }
+    ) =>
+      call<{ total: number; nulls: number; distinct: number; min: string | null; max: string | null; avg: string | null }>(
+        'table:stats',
+        id,
+        database,
+        schema,
+        table,
+        column,
+        opts
+      ),
     apply: (id: string, database: string, schema: string, table: string, changes: RowChange[]) =>
       call<number>('table:apply', id, database, schema, table, changes)
   },
