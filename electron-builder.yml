@@ -1,0 +1,29 @@
+# Mantém o nome interno "nexo-db" (sem productName): é ele que define a pasta de dados
+# (~/.config/nexo-db) e a chave do chaveiro usada para cifrar as senhas.
+appId: dev.victordeon.nexodb
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**
+  - resources/**
+  - package.json
+asarUnpack:
+  - resources/**
+npmRebuild: false
+linux:
+  syncDesktopName: true
+  target:
+    - dir
+    - AppImage
+  icon: resources/icon.png
+  category: Development
+  executableName: nexo-db
+  synopsis: Cliente PostgreSQL moderno
+  desktop:
+    entry:
+      Name: Nexo DB
+      StartupWMClass: nexo-db
+      Keywords: postgres;postgresql;sql;database;banco;
+appImage:
+  artifactName: Nexo-DB-${version}-${arch}.AppImage

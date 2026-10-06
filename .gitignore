@@ -1,6 +1,6 @@
+dist
+.DS_Store
+*.log
 node_modules
 out
-dist
-*.log
-.DS_Store
 *.tsbuildinfo
