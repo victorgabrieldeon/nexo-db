@@ -125,14 +125,44 @@ function columnsInScope(index: Index): CompletionSource {
   }
 }
 
+/** Peso por frequência de uso: decide empates de prefixo (ex.: "wh" → WHERE antes de WHEN). */
+const KEYWORD_WEIGHT: Record<string, number> = {
+  select: 6, from: 6, where: 6, and: 5, or: 4, join: 5, left: 4, inner: 3, on: 4, as: 4, order: 5, by: 5, group: 5,
+  limit: 5, insert: 4, into: 4, values: 4, update: 4, set: 4, delete: 4, not: 3, null: 3, is: 3, in: 3, like: 3,
+  ilike: 3, between: 2, distinct: 3, having: 3, offset: 3, desc: 3, asc: 3, returning: 2, with: 3, union: 2,
+  exists: 2, create: 3, table: 3, alter: 2, drop: 2, count: 2, case: 2, when: 1, then: 1, else: 1, end: 1
+}
+const CASE_WORDS = new Set(['when', 'then', 'else', 'end'])
+
+/** Há um CASE aberto antes do cursor no comando atual? (conta CASE … END ignorando strings/comentários) */
+function insideCase(text: string): boolean {
+  const clean = text
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .replace(/"(?:[^"]|"")*"/g, '""')
+    .replace(/--[^\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  let depth = 0
+  for (const m of clean.matchAll(/\b(case|end)\b/gi)) depth = Math.max(0, depth + (m[1].toLowerCase() === 'case' ? 1 : -1))
+  return depth > 0
+}
+
 function keywordSource(): CompletionSource {
-  const options: Completion[] = KEYWORDS.map((k) => ({ label: k.toUpperCase(), type: 'keyword', boost: -2 }))
+  const build = (inCase: boolean): Completion[] =>
+    KEYWORDS.map((k) => {
+      const weight = KEYWORD_WEIGHT[k] ?? 0
+      const caseBonus = inCase && CASE_WORDS.has(k) ? 8 : 0
+      return { label: k.toUpperCase(), type: 'keyword', boost: -2 + weight + caseBonus }
+    })
+  const normal = build(false)
+  const inCase = build(true)
   return (ctx) => {
     const word = ctx.matchBefore(/[A-Za-z_]\w*/)
     if (!word && !ctx.explicit) return null
     const from = word?.from ?? ctx.pos
     if (ctx.state.sliceDoc(from - 1, from) === '.') return null
-    return { from, options, validFor: /^\w*$/ }
+    const stmt = statementAt(ctx.state.doc.toString(), ctx.pos)
+    const before = stmt ? ctx.state.sliceDoc(stmt.from, from) : ''
+    return { from, options: insideCase(before) ? inCase : normal, validFor: /^\w*$/ }
   }
 }
 
@@ -179,9 +209,11 @@ function contextualSchemaSource(ns: SQLNamespace): CompletionSource {
     const prev = stmt ? previousKeyword(ctx.state.sliceDoc(stmt.from, ctx.pos)) : null
     const tableCtx = !!prev && TABLE_CONTEXT.has(prev)
     if (!tableCtx && res.from === ctx.pos && !ctx.explicit) return null
+    // a palavra sendo digitada logo após o nome da tabela é vista como alias; não sugere ela mesma
+    const typed = ctx.state.sliceDoc(res.from, ctx.pos)
     return {
       ...res,
-      options: res.options.map((o) => ({
+      options: res.options.filter((o) => !(o.type === 'constant' && o.label === typed)).map((o) => ({
         ...o,
         boost: tableCtx ? (o.type === 'namespace' ? 45 : 50) : o.type === 'constant' ? 10 : -8
       }))
