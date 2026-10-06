@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto'
 import * as db from './db'
 import * as store from './store'
 import { exportResult } from './export'
+import icon from '../../resources/icon.png?asset'
 import type { ConnectionConfig, ExportRequest, HistoryEntry, ObjectKind, RowChange, TableDataRequest } from '../shared/types'
 
 // permite isolar os dados (conexões/histórico) em outro diretório, útil para desenvolvimento e testes
@@ -23,6 +24,7 @@ function createWindow(): void {
     titleBarStyle: 'hidden',
     titleBarOverlay: process.platform === 'darwin' ? true : { color: '#00000000', symbolColor: '#8b93a7', height: 40 },
     trafficLightPosition: { x: 14, y: 13 },
+    ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
