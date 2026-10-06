@@ -1,12 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowDown, ArrowUp, ClipboardCopy, Columns3, Copy, CornerLeftDown, CornerRightDown, EyeOff, Eraser, Eye, ExternalLink, FileJson, KeyRound, Link2, RotateCcw, Trash2, Undo2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, ClipboardCopy, Columns3, Copy, CornerLeftDown, CornerRightDown, EyeOff, Eraser, Eye, ExternalLink, FileJson, Filter, KeyRound, Link2, RotateCcw, Trash2, Undo2 } from 'lucide-react'
 import type { FieldInfo } from '@shared/types'
 import { cn } from '@/lib/utils'
 import { isBoolType, isJsonType, isNumericType } from '@/lib/pgTypes'
 import { showContextMenu, type MenuEntry } from './ui'
 import { ValueViewer } from './ValueViewer'
 import { ColumnsMenu } from './ColumnsMenu'
+import { CustomFilterDialog, StatsDialog, ValuePickerDialog, cellFilterMenu, headerFilterMenu } from './ColumnTools'
+import { distinctLocal, statsLocal, type ColumnFilter, type ColumnStats, type DistinctValue, type FilterOp } from '@/lib/filters'
 
 type Cell = string | null
 const ROW_H = 28
@@ -27,7 +29,19 @@ export interface DataGridProps {
   rowOffset?: number
   /** ordenação controlada (servidor). Sem onSort a ordenação é local. */
   sort?: { column: string; dir: 'asc' | 'desc' } | null
-  onSort?: (column: string) => void
+  /** sem `dir`, alterna asc → desc → nenhuma */
+  onSort?: (column: string, dir?: 'asc' | 'desc') => void
+  /** filtros ativos (para indicar no cabeçalho e oferecer remoção) */
+  filters?: ColumnFilter[]
+  /** habilita os menus de filtro */
+  onAddFilter?: (f: Omit<ColumnFilter, 'id'>) => void
+  onClearColumnFilters?: (column: string) => void
+  /** valores distintos de uma coluna (padrão: calcula sobre as linhas carregadas) */
+  loadDistinct?: (col: number) => Promise<DistinctValue[]>
+  /** resumo de uma coluna (padrão: calcula sobre as linhas carregadas) */
+  loadStats?: (col: number) => Promise<ColumnStats>
+  /** "contar por valor" — só onde dá para gerar a consulta (tabelas) */
+  onGroupCount?: (column: string) => void
   editable?: boolean
   pkColumns?: string[]
   edits?: GridEdits
@@ -147,7 +161,13 @@ export const DataGrid = memo(function DataGrid({
   onVisibleColumnsChange,
   fkColumns,
   refColumns,
-  onFkNavigate
+  onFkNavigate,
+  filters = [],
+  onAddFilter,
+  onClearColumnFilters,
+  loadDistinct,
+  loadStats,
+  onGroupCount
 }: DataGridProps) {
   const scroller = useRef<HTMLDivElement>(null)
   const [widths, setWidths] = useState<number[]>(() => estimateWidths(fields, rows))
@@ -161,6 +181,9 @@ export const DataGrid = memo(function DataGrid({
   const headerRef = useRef<HTMLDivElement>(null)
   const dragMoved = useRef(false)
   const [ctrlHeld, setCtrlHeld] = useState(false)
+  const [tool, setTool] = useState<{ kind: 'values' | 'custom' | 'stats'; col: number; preset?: { op: FilterOp; values: Cell[] } } | null>(
+    null
+  )
 
   // Ctrl/Cmd pressionado: células FK viram "links"
   useEffect(() => {
@@ -427,6 +450,16 @@ export const DataGrid = memo(function DataGrid({
       })
     }
     if (items.length) items.push('separator')
+    if (onAddFilter) {
+      // valores selecionados nesta coluna (seleção de várias linhas numa coluna só)
+      const n = (sel && normalize(sel)) ?? { r0: r, r1: r, c0: c, c1: c }
+      const inSel = r >= n.r0 && r <= n.r1 && c >= n.c0 && c <= n.c1
+      const selected: Cell[] = []
+      if (inSel && n.c0 === n.c1 && n.r1 > n.r0) {
+        for (let i = n.r0; i <= n.r1 && selected.length < 1000; i++) selected.push(valueAt(order[i], col))
+      }
+      items.push(...filterMenu(col, 'cell', valueAt(src, col), selected), 'separator')
+    }
     items.push(
       { label: 'Copiar', icon: <Copy />, shortcut: 'Ctrl+C', onSelect: () => copySelection('tsv') },
       { label: 'Copiar com cabeçalho', icon: <ClipboardCopy />, shortcut: 'Ctrl+⇧+C', onSelect: () => copySelection('tsv', true) },
@@ -549,8 +582,29 @@ export const DataGrid = memo(function DataGrid({
     setLayout({ order: layout.order, hidden: new Set([...layout.hidden, col]) })
   }
 
+  const filterMenu = (col: number, where: 'cell' | 'header', value: Cell = null, selected: Cell[] = []): MenuEntry[] => {
+    if (!onAddFilter) return []
+    const field = fields[col]
+    const ctx = {
+      field,
+      add: onAddFilter,
+      active: filters.filter((f) => f.column === field.name),
+      clearColumn: () => onClearColumnFilters?.(field.name),
+      openTool: (kind: 'values' | 'custom' | 'stats', preset?: { op: FilterOp; values: Cell[] }) => setTool({ kind, col, preset })
+    }
+    if (where === 'cell') return cellFilterMenu({ ...ctx, value, selected })
+    return headerFilterMenu({
+      ...ctx,
+      sort: (dir) => {
+        if (onSort) onSort(field.name, dir)
+        else setLocalSort({ col, dir })
+      },
+      groupCount: onGroupCount ? () => onGroupCount(field.name) : undefined
+    })
+  }
+
   const headerMenu = (e: React.MouseEvent, col: number): void => {
-    showContextMenu(e, [
+    const layoutItems: MenuEntry[] = [
       { label: 'Ocultar coluna', icon: <EyeOff />, disabled: cols.length <= 1, onSelect: () => hideColumn(col) },
       {
         label: 'Mostrar somente esta',
@@ -558,20 +612,24 @@ export const DataGrid = memo(function DataGrid({
         onSelect: () => setLayout({ order: layout.order, hidden: new Set(layout.order.filter((c) => c !== col)) })
       },
       { label: 'Escolher colunas…', icon: <Columns3 />, onSelect: () => setColumnsOpen(true) },
-      'separator',
-      {
-        label: 'Copiar nome',
-        icon: <Copy />,
-        onSelect: () => window.api.copy(fields[col].name)
-      },
       {
         label: 'Restaurar colunas',
         icon: <RotateCcw />,
         disabled: !layout.hidden.size && layout.order.every((c, i) => c === i),
         onSelect: () => setLayout(defaultLayout(fields))
       }
+    ]
+    const filterItems = filterMenu(col, 'header')
+    showContextMenu(e, [
+      ...filterItems,
+      ...(filterItems.length ? (['separator'] as MenuEntry[]) : []),
+      { label: 'Colunas', icon: <Columns3 />, children: layoutItems },
+      { label: 'Copiar nome', icon: <Copy />, onSelect: () => window.api.copy(fields[col].name) }
     ])
   }
+
+  const toolField = tool ? fields[tool.col] : null
+  const columnValues = (col: number): Cell[] => order.map((src) => valueAt(src, col))
 
   const norm = sel ? normalize(sel) : null
   const items = virtualizer.getVirtualItems()
@@ -637,6 +695,11 @@ export const DataGrid = memo(function DataGrid({
                     )}
                     <span className="truncate text-[12px] font-semibold text-fg">{f.name}</span>
                     {dir && (dir === 'asc' ? <ArrowUp className="size-3 shrink-0 text-accent" /> : <ArrowDown className="size-3 shrink-0 text-accent" />)}
+                    {filters.some((x) => x.column === f.name) && (
+                      <span title={`${filters.filter((x) => x.column === f.name).length} filtro(s) ativo(s)`} className="shrink-0">
+                        <Filter className="size-3 fill-accent/30 text-accent" />
+                      </span>
+                    )}
                   </div>
                   <span className="truncate font-mono text-[10px] leading-tight text-faint">{f.typeName}</span>
                   <div
@@ -805,6 +868,28 @@ export const DataGrid = memo(function DataGrid({
           onChange={(order, hidden) => setLayout({ order, hidden })}
           onReset={() => setLayout(defaultLayout(fields))}
           onClose={() => setColumnsOpen(false)}
+        />
+      )}
+      {tool?.kind === 'values' && toolField && onAddFilter && (
+        <ValuePickerDialog
+          field={toolField}
+          load={() => (loadDistinct ? loadDistinct(tool.col) : Promise.resolve(distinctLocal(columnValues(tool.col))))}
+          current={filters.find((x) => x.column === toolField.name && x.op === 'in')}
+          onApply={onAddFilter}
+          onClose={() => setTool(null)}
+        />
+      )}
+      {tool?.kind === 'custom' && toolField && onAddFilter && (
+        <CustomFilterDialog field={toolField} preset={tool.preset} onApply={onAddFilter} onClose={() => setTool(null)} />
+      )}
+      {tool?.kind === 'stats' && toolField && (
+        <StatsDialog
+          field={toolField}
+          load={() => (loadStats ? loadStats(tool.col) : Promise.resolve(statsLocal(columnValues(tool.col), toolField.typeName)))}
+          onFilterValue={(v) =>
+            onAddFilter?.({ column: toolField.name, typeName: toolField.typeName, op: v === null ? 'isNull' : 'eq', values: [v] })
+          }
+          onClose={() => setTool(null)}
         />
       )}
       <ValueViewer
