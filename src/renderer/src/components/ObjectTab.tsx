@@ -21,7 +21,9 @@ import { toast } from 'sonner'
 import type { QueryResult, RowChange, TableDetails } from '@shared/types'
 import { useTabs, type ObjectTab as ObjectTabModel, type ObjectView } from '@/stores/tabs'
 import { useConnections } from '@/stores/connections'
-import { cn, errorMessage, formatBytes, formatCount, formatDuration, qualifiedName } from '@/lib/utils'
+import { cn, errorMessage, formatBytes, formatCount, formatDuration, qualifiedName, quoteIdent, uid } from '@/lib/utils'
+import { filterToSql, typeKind, type ColumnFilter, type ColumnStats, type DistinctValue } from '@/lib/filters'
+import { FilterChips } from './ColumnTools'
 import { type GridEdits } from './DataGrid'
 import { FkGrid } from './FkGrid'
 import { SqlEditor } from './SqlEditor'
@@ -135,6 +137,14 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
   const [saving, setSaving] = useState(false)
   const [total, setTotal] = useState<number | null>(null)
   const [visibleCols, setVisibleCols] = useState<number[] | null>(null)
+  const [colFilters, setColFilters] = useState<ColumnFilter[]>([])
+  const newQuery = useTabs((s) => s.newQuery)
+
+  // WHERE efetivo: texto livre + filtros de coluna (chips), tudo com AND
+  const where = useMemo(
+    () => [appliedFilter.trim() && `(${appliedFilter.trim()})`, ...colFilters.map((f) => `(${filterToSql(f)})`)].filter(Boolean).join(' and '),
+    [appliedFilter, colFilters]
+  )
 
   const pkColumns = useMemo(() => details?.columns.filter((c) => c.isPrimaryKey).map((c) => c.name) ?? [], [details])
   const isTable = tab.objKind === 'table' || tab.objKind === 'partitioned' || tab.objKind === 'foreign'
@@ -153,7 +163,7 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
         table: tab.name,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
-        where: appliedFilter,
+        where,
         orderBy: sort
       })
       setData(res)
@@ -164,26 +174,27 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
     } finally {
       setLoading(false)
     }
-  }, [tab.connId, tab.database, tab.schema, tab.name, page, appliedFilter, sort])
+  }, [tab.connId, tab.database, tab.schema, tab.name, page, where, sort])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  useEffect(() => setTotal(null), [appliedFilter])
+  useEffect(() => setTotal(null), [where])
 
   // filtro vindo de navegação por FK
   useEffect(() => {
     if (tab.filterNonce === undefined) return
     setFilter(tab.filter ?? '')
     setAppliedFilter(tab.filter ?? '')
+    setColFilters([])
     setPage(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab.filterNonce])
 
   const countRows = async (): Promise<void> => {
     try {
-      setTotal(await window.api.table.count(tab.connId, tab.database, tab.schema, tab.name, appliedFilter))
+      setTotal(await window.api.table.count(tab.connId, tab.database, tab.schema, tab.name, where))
     } catch (e) {
       toast.error('Falha ao contar', { description: errorMessage(e) })
     }
@@ -274,9 +285,57 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
     }
   }
 
-  const onSort = (column: string): void => {
-    setSort((s) => (s?.column !== column ? { column, dir: 'asc' } : s.dir === 'asc' ? { column, dir: 'desc' } : null))
+  const onSort = (column: string, dir?: 'asc' | 'desc'): void => {
+    setSort((s) => (dir ? { column, dir } : s?.column !== column ? { column, dir: 'asc' } : s.dir === 'asc' ? { column, dir: 'desc' } : null))
     setPage(0)
+  }
+
+  /** filtros recarregam a página: alterações não salvas se perderiam */
+  const guardEdits = (): boolean => {
+    if (pendingCount === 0) return true
+    toast.message('Salve ou descarte as alterações antes de filtrar')
+    return false
+  }
+
+  const addFilter = (f: Omit<ColumnFilter, 'id'>): void => {
+    if (!guardEdits()) return
+    // um novo filtro substitui o de mesmo operador na mesma coluna; operadores diferentes se somam (AND)
+    setColFilters((list) => [...list.filter((x) => !(x.column === f.column && x.op === f.op)), { ...f, id: uid() }])
+    setPage(0)
+  }
+
+  const updateFilters = (fn: (list: ColumnFilter[]) => ColumnFilter[]): void => {
+    if (!guardEdits()) return
+    setColFilters(fn)
+    setPage(0)
+  }
+
+  const fieldAt = (col: number): string => data!.fields[col].name
+
+  const loadDistinct = async (col: number): Promise<DistinctValue[]> =>
+    window.api.table.distinct(tab.connId, tab.database, tab.schema, tab.name, fieldAt(col), where)
+
+  const loadStats = async (col: number): Promise<ColumnStats> => {
+    const field = data!.fields[col]
+    const kind = typeKind(field.typeName)
+    const [base, top] = await Promise.all([
+      window.api.table.stats(tab.connId, tab.database, tab.schema, tab.name, field.name, {
+        where,
+        minMax: kind === 'number' || kind === 'date' || kind === 'text',
+        avg: kind === 'number'
+      }),
+      window.api.table.distinct(tab.connId, tab.database, tab.schema, tab.name, field.name, where, 10)
+    ])
+    const avg = base.avg === null ? null : Number(base.avg).toLocaleString('pt-BR', { maximumFractionDigits: 4 })
+    return { ...base, avg, top, scope: 'table' }
+  }
+
+  const groupCount = (column: string): void => {
+    const col = quoteIdent(column)
+    const sql = [`SELECT ${col}, count(*) AS total`, `FROM ${qualifiedName(tab.schema, tab.name)}`]
+    if (where) sql.push(`WHERE ${where}`)
+    sql.push('GROUP BY 1', 'ORDER BY 2 DESC;')
+    newQuery({ connId: tab.connId, database: tab.database, sql: sql.join('\n'), title: `${tab.name} · ${column}` })
   }
 
   const fromRow = page * PAGE_SIZE + 1
@@ -321,6 +380,13 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
         )}
       </div>
 
+      <FilterChips
+        filters={colFilters}
+        onRemove={(id) => updateFilters((l) => l.filter((f) => f.id !== id))}
+        onClear={() => updateFilters(() => [])}
+        summary={total != null ? `${formatCount(total)} ${total === 1 ? 'linha' : 'linhas'}` : undefined}
+      />
+
       <div className="relative min-h-0 flex-1">
         {error ? (
           <div className="m-4 rounded-xl border border-err/30 bg-err/10 p-4 font-mono text-[12.5px] text-err select-text">{error}</div>
@@ -342,7 +408,13 @@ function DataView({ tab, details }: { tab: ObjectTabModel; details: TableDetails
             tableName={qualifiedName(tab.schema, tab.name)}
             layoutKey={`${tab.connId}|${tab.database}|${tab.schema}.${tab.name}`}
             onVisibleColumnsChange={setVisibleCols}
-            emptyText={appliedFilter ? 'Nenhuma linha corresponde ao filtro' : 'Tabela vazia'}
+            filters={colFilters}
+            onAddFilter={addFilter}
+            onClearColumnFilters={(column) => updateFilters((l) => l.filter((f) => f.column !== column))}
+            loadDistinct={loadDistinct}
+            loadStats={loadStats}
+            onGroupCount={groupCount}
+            emptyText={where ? 'Nenhuma linha corresponde ao filtro' : 'Tabela vazia'}
           />
         ) : (
           <div className="flex h-full items-center justify-center">
