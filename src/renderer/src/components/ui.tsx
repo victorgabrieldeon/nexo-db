@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from 'motion/react'
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Loader2, X } from 'lucide-react'
+import { ChevronRight, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 type Variant = 'primary' | 'ghost' | 'subtle' | 'danger'
@@ -144,11 +144,15 @@ export interface MenuItem {
   label: string
   icon?: ReactNode
   shortcut?: string
+  /** texto auxiliar à direita, mais apagado */
+  hint?: string
   danger?: boolean
   disabled?: boolean
-  onSelect: () => void
+  onSelect?: () => void
+  /** submenu aberto ao passar o mouse */
+  children?: MenuEntry[]
 }
-export type MenuEntry = MenuItem | 'separator'
+export type MenuEntry = MenuItem | 'separator' | { heading: string }
 
 interface MenuState {
   x: number
@@ -166,8 +170,6 @@ export function showContextMenu(e: { clientX: number; clientY: number; preventDe
 
 export function ContextMenuHost() {
   const [menu, setMenu] = useState<MenuState | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState({ x: 0, y: 0 })
 
   useEffect(() => {
     openMenuFn = setMenu
@@ -175,15 +177,6 @@ export function ContextMenuHost() {
       openMenuFn = null
     }
   }, [])
-
-  useLayoutEffect(() => {
-    if (!menu || !ref.current) return
-    const r = ref.current.getBoundingClientRect()
-    setPos({
-      x: Math.min(menu.x, window.innerWidth - r.width - 8),
-      y: Math.min(menu.y, window.innerHeight - r.height - 8)
-    })
-  }, [menu])
 
   useEffect(() => {
     if (!menu) return
@@ -211,43 +204,113 @@ export function ContextMenuHost() {
   return createPortal(
     <AnimatePresence>
       {menu && (
-        <motion.div
-          ref={ref}
-          key={`${menu.x}-${menu.y}`}
-          className="fixed z-[60] min-w-[200px] rounded-xl border border-line-strong bg-[#141821f2] p-1 shadow-[0_16px_48px_-12px_#000000c0] backdrop-blur-xl"
-          style={{ left: pos.x, top: pos.y }}
-          initial={{ opacity: 0, scale: 0.97 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.08 } }}
-          transition={{ duration: 0.12, ease: [0.22, 1, 0.36, 1] }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          {menu.items.map((item, i) =>
-            item === 'separator' ? (
-              <div key={i} className="mx-2 my-1 h-px bg-line-strong" />
-            ) : (
-              <button
-                key={i}
-                disabled={item.disabled}
-                className={cn(
-                  'flex h-7 w-full items-center gap-2.5 rounded-md px-2 text-left text-[12.5px] transition-colors disabled:opacity-40',
-                  item.danger ? 'text-err hover:bg-err/15' : 'text-fg hover:bg-accent/20'
-                )}
-                onClick={() => {
-                  setMenu(null)
-                  item.onSelect()
-                }}
-              >
-                <span className="flex size-4 items-center justify-center text-muted [&>svg]:size-3.5">{item.icon}</span>
-                <span className="flex-1">{item.label}</span>
-                {item.shortcut && <span className="text-[11px] text-faint">{item.shortcut}</span>}
-              </button>
-            )
-          )}
-        </motion.div>
+        <MenuPanel key={`${menu.x}-${menu.y}`} items={menu.items} anchor={{ x: menu.x, y: menu.y }} onClose={() => setMenu(null)} />
       )}
     </AnimatePresence>,
     document.body
+  )
+}
+
+/** Um painel de menu; submenus abrem ao lado do item (ou do outro lado se não couber). */
+function MenuPanel({
+  items,
+  anchor,
+  onClose,
+  parentRect
+}: {
+  items: MenuEntry[]
+  anchor: { x: number; y: number }
+  onClose: () => void
+  /** retângulo do item pai, para submenus */
+  parentRect?: DOMRect
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState(anchor)
+  const [open, setOpen] = useState<{ index: number; rect: DOMRect } | null>(null)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+
+  useLayoutEffect(() => {
+    if (!ref.current) return
+    const r = ref.current.getBoundingClientRect()
+    let x = anchor.x
+    let y = anchor.y
+    if (parentRect && x + r.width > window.innerWidth - 8) x = parentRect.left - r.width + 4
+    x = Math.max(8, Math.min(x, window.innerWidth - r.width - 8))
+    y = Math.max(8, Math.min(y, window.innerHeight - r.height - 8))
+    setPos({ x, y })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => () => clearTimeout(hoverTimer.current), [])
+
+  const hover = (index: number, el: HTMLElement, hasChildren: boolean): void => {
+    clearTimeout(hoverTimer.current)
+    // pequeno atraso: atravessar outros itens a caminho do submenu não o fecha
+    hoverTimer.current = setTimeout(() => setOpen(hasChildren ? { index, rect: el.getBoundingClientRect() } : null), hasChildren ? 60 : 160)
+  }
+
+  const openItem = open !== null ? items[open.index] : null
+
+  return (
+    <>
+      <motion.div
+        ref={ref}
+        className="fixed z-[60] max-h-[calc(100vh-16px)] min-w-[210px] overflow-y-auto rounded-xl border border-line-strong bg-[#141821f2] p-1 shadow-[0_16px_48px_-12px_#000000c0] backdrop-blur-xl"
+        style={{ left: pos.x, top: pos.y }}
+        initial={{ opacity: 0, scale: 0.97 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.08 } }}
+        transition={{ duration: 0.12, ease: [0.22, 1, 0.36, 1] }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {items.map((item, i) => {
+          if (item === 'separator') return <div key={i} className="mx-2 my-1 h-px bg-line-strong" />
+          if ('heading' in item) {
+            return (
+              <div key={i} className="px-2 pt-1.5 pb-1 text-[10.5px] font-semibold tracking-wide text-faint uppercase">
+                {item.heading}
+              </div>
+            )
+          }
+          const hasChildren = !!item.children?.length
+          return (
+            <button
+              key={i}
+              disabled={item.disabled}
+              onMouseEnter={(e) => hover(i, e.currentTarget, hasChildren)}
+              className={cn(
+                'flex h-7 w-full items-center gap-2.5 rounded-md px-2 text-left text-[12.5px] whitespace-nowrap transition-colors disabled:opacity-40',
+                item.danger ? 'text-err hover:bg-err/15' : 'text-fg hover:bg-accent/20',
+                open?.index === i && 'bg-accent/20'
+              )}
+              onClick={(e) => {
+                if (hasChildren) {
+                  setOpen({ index: i, rect: e.currentTarget.getBoundingClientRect() })
+                  return
+                }
+                onClose()
+                item.onSelect?.()
+              }}
+            >
+              <span className="flex size-4 shrink-0 items-center justify-center text-muted [&>svg]:size-3.5">{item.icon}</span>
+              <span className="max-w-[340px] flex-1 truncate">{item.label}</span>
+              {item.hint && <span className="max-w-[160px] truncate font-mono text-[11px] text-faint">{item.hint}</span>}
+              {item.shortcut && <span className="text-[11px] text-faint">{item.shortcut}</span>}
+              {hasChildren && <ChevronRight className="size-3.5 text-faint" />}
+            </button>
+          )
+        })}
+      </motion.div>
+      {open && openItem && openItem !== 'separator' && !('heading' in openItem) && openItem.children && (
+        <MenuPanel
+          key={open.index}
+          items={openItem.children}
+          anchor={{ x: open.rect.right - 4, y: open.rect.top - 5 }}
+          parentRect={open.rect}
+          onClose={onClose}
+        />
+      )}
+    </>
   )
 }
 
