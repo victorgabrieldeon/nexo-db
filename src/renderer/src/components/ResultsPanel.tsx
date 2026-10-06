@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'motion/react'
-import { AlertTriangle, CheckCircle2, Clock, Download, FileJson, FileSpreadsheet, FileCode2, Info, Rows3, TerminalSquare, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Clock, Download, FileJson, FileSpreadsheet, FileCode2, Info, Rows3, Search, TerminalSquare, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import type { QueryError, QueryResult } from '@shared/types'
-import { cn, errorMessage, formatCount, formatDuration } from '@/lib/utils'
+import { cn, errorMessage, formatCount, formatDuration, uid } from '@/lib/utils'
 import { FkGrid } from './FkGrid'
+import { FilterChips } from './ColumnTools'
+import { applyFilters, type ColumnFilter } from '@/lib/filters'
 import { IconButton, showContextMenu } from './ui'
 
 export interface ResultEntry {
@@ -100,6 +102,30 @@ export function ResultsPanel({
 }) {
   const current = results.find((r) => r.id === active)
   const [visibleCols, setVisibleCols] = useState<number[] | null>(null)
+  const [filtersByResult, setFiltersByResult] = useState<Record<string, ColumnFilter[]>>({})
+  const [search, setSearch] = useState('')
+  const filters = (current && filtersByResult[current.id]) || []
+
+  useEffect(() => setSearch(''), [current?.id])
+
+  // filtros e busca rápida rodam sobre as linhas já carregadas (sem reexecutar a consulta)
+  const shownRows = useMemo(() => {
+    if (!current) return []
+    let rows = applyFilters(
+      filters,
+      current.result.fields.map((f) => f.name),
+      current.result.rows
+    )
+    const term = search.trim().toLocaleLowerCase()
+    if (term) rows = rows.filter((r) => r.some((v) => v !== null && v.toLocaleLowerCase().includes(term)))
+    return rows
+  }, [current, filters, search])
+  const isFiltered = !!current && shownRows.length !== current.result.rows.length
+
+  const setFilters = (fn: (list: ColumnFilter[]) => ColumnFilter[]): void => {
+    if (!current) return
+    setFiltersByResult((m) => ({ ...m, [current.id]: fn(m[current.id] ?? []) }))
+  }
   const errors = log.filter((l) => l.kind === 'error').length
   const tabs = [
     ...results.map((r, i) => ({ id: r.id, label: results.length > 1 ? `Resultado ${i + 1}` : 'Resultado', icon: <Rows3 className="size-3.5" /> })),
@@ -153,15 +179,33 @@ export function ResultsPanel({
                   <AlertTriangle className="size-3.5" /> limitado a {formatCount(maxRows)}
                 </span>
               )}
+              {current.result.fields.length > 0 && (
+                <div className="flex h-6 w-[180px] items-center gap-1.5 rounded-md bg-bg px-2 ring-1 ring-line transition-shadow focus-within:ring-accent">
+                  <Search className="size-3 shrink-0 text-faint" />
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Escape' && setSearch('')}
+                    placeholder="Buscar nos resultados"
+                    className="w-full bg-transparent text-[12px] text-fg outline-none placeholder:text-faint"
+                  />
+                </div>
+              )}
               <span className="flex items-center gap-1">
                 <Rows3 className="size-3.5" />
-                {describeResult(current.result)}
+                {isFiltered ? (
+                  <span>
+                    <span className="text-accent">{formatCount(shownRows.length)}</span> de {describeResult(current.result)}
+                  </span>
+                ) : (
+                  describeResult(current.result)
+                )}
               </span>
               <span className="flex items-center gap-1">
                 <Clock className="size-3.5" />
                 {formatDuration(current.result.durationMs)}
               </span>
-              {current.result.fields.length > 0 && <ExportButton result={projectResult(current.result, visibleCols)} name="resultado" />}
+              {current.result.fields.length > 0 && <ExportButton result={projectResult({ ...current.result, rows: shownRows }, visibleCols)} name="resultado" />}
             </div>
           )
         )}
@@ -171,14 +215,25 @@ export function ResultsPanel({
         {active === 'log' || !current ? (
           <MessageLog log={log} />
         ) : current.result.fields.length ? (
-          <FkGrid
-            key={current.id}
-            connId={current.connId}
-            database={current.database}
-            fields={current.result.fields}
-            rows={current.result.rows}
-            onVisibleColumnsChange={setVisibleCols}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <FilterChips filters={filters} onRemove={(id) => setFilters((l) => l.filter((f) => f.id !== id))} onClear={() => setFilters(() => [])} />
+            <div className="min-h-0 flex-1">
+              <FkGrid
+                key={current.id}
+                connId={current.connId}
+                database={current.database}
+                fields={current.result.fields}
+                rows={shownRows}
+                onVisibleColumnsChange={setVisibleCols}
+                filters={filters}
+                onAddFilter={(f) =>
+                  setFilters((l) => [...l.filter((x) => !(x.column === f.column && x.op === f.op)), { ...f, id: uid() }])
+                }
+                onClearColumnFilters={(column) => setFilters((l) => l.filter((f) => f.column !== column))}
+                emptyText={isFiltered ? 'Nenhuma linha corresponde aos filtros' : 'Nenhuma linha'}
+              />
+            </div>
+          </div>
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-muted">
             <CheckCircle2 className="size-8 text-ok" strokeWidth={1.5} />
